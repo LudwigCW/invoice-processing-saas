@@ -113,35 +113,56 @@ const standardizeDate = (rawDate) => {
   return clean;
 };
 
+// Intelligente Währungserkennung
 const parseCurrency = (str) => {
   if (!str) return 0.0;
-  let clean = str.replace(/[^0-9.,-]/g, ''); 
+  let clean = str.trim();
   
-  const lastCommaIndex = clean.lastIndexOf(',');
-  const lastDotIndex = clean.lastIndexOf('.');
-
-  if (lastCommaIndex > lastDotIndex) { 
-    clean = clean.replace(/\./g, '');
-    clean = clean.replace(',', '.');
-  } else { 
-    clean = clean.replace(/,/g, '');
+  if (/\d\s+\d/.test(clean)) {
+    clean = clean.replace(/\s+/g, '');
   }
   
-  const val = parseFloat(clean);
-  return isNaN(val) ? 0.0 : val;
+  clean = clean.replace(/[^0-9.,-]/g, '');
+
+  const lastComma = clean.lastIndexOf(',');
+  const lastDot = clean.lastIndexOf('.');
+
+  if (lastComma > -1 && lastDot > -1) {
+    if (lastComma > lastDot) {
+        clean = clean.replace(/\./g, '').replace(',', '.');
+    } else {
+        clean = clean.replace(/,/g, '');
+    }
+  } 
+  else if (lastComma > -1) {
+    const afterComma = clean.substring(lastComma + 1);
+    if (afterComma.length === 3) {
+        clean = clean.replace(/,/g, '');
+    } else {
+        clean = clean.replace(',', '.');
+    }
+  }
+  else if (lastDot > -1) {
+     const afterDot = clean.substring(lastDot + 1);
+     if (afterDot.length === 3) {
+        clean = clean.replace(/\./g, '');
+     }
+  }
+
+  return parseFloat(clean) || 0.0;
 };
 
-// --- Länderregeln (Aktualisiert für CZ und PL basierend auf CSV) ---
+// --- Länderregeln (Update: SK Betragssuche) ---
 const COUNTRY_RULES = [
   {
     id: 'CZ',
     name: 'Czech Republic',
     indicators: ['Česká republika', 'Czech', 'Faktura', 'DIČ', 'IČO'],
-    currency: 'CZK',
+    currency: 'Kč',
     keywords: {
-      date: 'Datum\\s*faktury\\s*:?', // Aktualisiert aus CSV
-      number: 'Číslo\\s*faktury\\s*:?', // Aktualisiert aus CSV
-      amount: '(?:Celková\\s*cena\\s*všech\\s*článků|Celkem\\s*k\\s*úhradě|K\\s*úhradě)' // Aktualisiert + Fallback
+      date: 'Datum\\s*faktury\\s*:?', 
+      number: '(?:[CcČč].{0,10}[sSšŠ]lo.{0,10}fakt[uUúÚ]ry|Faktura\\s*.{0,5}[cčČ]\\.?|Doklad\\s*.{0,5}[cčČ]\\.?)\\s*:?', 
+      amount: '(?:Celkov.*?cena.*?ch.*?nk|Celkem\\s*k\\s*úhradě|K\\s*úhradě|Celková\\s*částka)' 
     },
     booking: { text: 'Verkauf über Kaufland Tschechien', soll: 10002, haben: 4320, taxKey: '240', euLand: 'CZ', euRate: '0.21' }
   },
@@ -149,11 +170,11 @@ const COUNTRY_RULES = [
     id: 'PL',
     name: 'Poland',
     indicators: ['Polska', 'Poland', 'Faktura VAT', 'NIP', 'PL'],
-    currency: 'PLN',
+    currency: 'zł',
     keywords: {
-      date: 'Data\\s*faktury\\s*:?', // Aktualisiert aus CSV
-      number: 'Numer\\s*rachunku\\s*:?', // Aktualisiert aus CSV
-      amount: '(?:Do\\s*zapłaty|Razem\\s*brutto|Kwota\\s*do\\s*zapłaty|Suma)'
+      date: 'Data\\s*faktury\\s*:?', 
+      number: '(?:Numer\\s*.{0,10}rachunku|Faktura\\s*.{0,5}nr)\\s*:?', 
+      amount: '(?:Cena.*?kowita|Do\\s*zapłaty|Razem\\s*brutto|Kwota\\s*do\\s*zapłaty|Suma)'
     },
     booking: { text: 'Verkauf über Kaufland Polen', soll: 10002, haben: 4320, taxKey: '240', euLand: 'PL', euRate: '0.23' }
   },
@@ -178,7 +199,12 @@ const COUNTRY_RULES = [
     name: 'Slovakia',
     indicators: ['Dátum faktúry', 'Datum faktury', 'Slowakei', 'Slovakia', 'Slovenská'],
     currency: 'EUR',
-    keywords: { date: 'tum\\s*fak', number: '(?:[ČC.]+[íi.]slo\\s*fakt[úu.]r[ya.]?|Fakt[úu.]ra\\s*[čc.]|Fakt[úu.]ra)', amount: '(?:Celkov[áa.]\\s*cena|Spolu|K\\s*úhrade)' },
+    keywords: { 
+      date: 'tum\\s*fak', 
+      number: '(?:[ČC.]+[íi.]slo\\s*fakt[úu.]r[ya.]?|Fakt[úu.]ra\\s*[čc.]|Fakt[úu.]ra)', 
+      // FIX: Celkov.*?cena erfasst alles zwischen "Celkov" und "cena" (z.B. Celková cena)
+      amount: '(?:Celkov.*?cena|Celkov.*?suma|K\\s*úhrade|Fakturovaná\\s*suma)' 
+    },
     booking: { text: 'Verkauf über Kaufland Slowakei', soll: 10002, haben: 4320, taxKey: '240', euLand: 'SK', euRate: '0.23' }
   },
   {
@@ -209,29 +235,24 @@ export default function App() {
   const [lastProcessedText, setLastProcessedText] = useState("");
   const [pdfLib, setPdfLib] = useState(null);
   
-  // States für Einstellungen
   const [showSettings, setShowSettings] = useState(false);
   const [rates, setRates] = useState(() => {
-    // Lade gespeicherte Kurse oder nimm Defaults
     const saved = localStorage.getItem('exchangeRates');
     return saved ? JSON.parse(saved) : DEFAULT_RATES;
   });
 
   if (!app) return <div className="p-8 text-red-800">Firebase Config fehlt!</div>;
 
-  // Speichere Kurse bei Änderung
   useEffect(() => {
     localStorage.setItem('exchangeRates', JSON.stringify(rates));
   }, [rates]);
 
-  // Auth & PDF Init
   useEffect(() => {
     signInAnonymously(auth).catch(console.error);
     onAuthStateChanged(auth, u => { setUser(u); setLoading(false); });
     loadPdfJs().then(setPdfLib).catch(console.error);
   }, []);
 
-  // Invoices Sync
   useEffect(() => {
     if (!user) { setInvoices([]); return; }
     const q = collection(db, 'artifacts', appId, 'users', user.uid, 'invoices');
@@ -267,14 +288,15 @@ export default function App() {
       const pdf = await loadingTask.promise;
       const page = await pdf.getPage(1);
       const textContent = await page.getTextContent();
-      const text = textContent.items.map(i => i.str).join('\n');
-      const singleLineText = textContent.items.map(i => i.str).join(' ');
+      
+      const textItems = textContent.items.map(i => i.str);
+      const text = textItems.join('\n');
+      const singleLineText = textItems.join(' ');
       
       setLastProcessedText(text);
 
       // 1. Detect Country
       let matchedRule = null;
-      // Priorität für spezifische Keywords aus CSV
       if (/Datum\s*faktury/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'CZ');
       else if (/Data\s*faktury|Numer\s*rachunku/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'PL');
       else if (/Data\s*della\s*fattura/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'IT');
@@ -284,7 +306,6 @@ export default function App() {
         matchedRule = (/Österreich|Austria/i.test(text)) ? COUNTRY_RULES.find(r => r.id === 'AT') : COUNTRY_RULES.find(r => r.id === 'DE');
       }
       
-      // Fallback Ländersuche
       if (!matchedRule) {
         if (/Italia|Italy|Italien/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'IT');
         else if (/France|Frankreich|République/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'FR');
@@ -324,7 +345,7 @@ export default function App() {
 
       // NUMBER
       const numKey = matchedRule.keywords.number;
-      const strictNumRegex = new RegExp(`${numKey}.{0,20}?([A-Za-z0-9\\-/]*\\d+[A-Za-z0-9\\-/]*)`, 'i');
+      const strictNumRegex = new RegExp(`${numKey}.{0,40}?([A-Za-z0-9\\-/]*\\d+[A-Za-z0-9\\-/]*)`, 'i');
       let numMatch = null;
       const lines = text.split('\n');
       for (const line of lines) { numMatch = line.match(strictNumRegex); if (numMatch) break; }
@@ -332,34 +353,44 @@ export default function App() {
       if (numMatch) data.invoiceNumber = numMatch[1];
       if (!data.invoiceNumber || !/^\d{8}$/.test(data.invoiceNumber)) {
         const eightDigit = text.match(/\b(\d{8})\b/);
-        if (eightDigit) data.invoiceNumber = eightDigit[1];
+        if (eightDigit && (!data.invoiceNumber || data.invoiceNumber.length < 3)) data.invoiceNumber = eightDigit[1];
       }
 
       // AMOUNT & CONVERSION
       const amountKey = matchedRule.keywords.amount;
-      const amountRegex = new RegExp(`${amountKey}.{0,60}?([\\d.,]+)(?:\\s*[€A-ZKčzł]*)`, 'i');
-      let amountMatch = singleLineText.match(amountRegex);
+      let amountMatch = null;
       
-      // Fallback Line search
-      if (!amountMatch) {
-        for (const line of lines) {
-           if (new RegExp(amountKey, 'i').test(line)) {
-             const priceMatch = line.match(/([\d.,]+)/);
-             if (priceMatch && (priceMatch[1].includes('.') || priceMatch[1].includes(','))) {
-                amountMatch = priceMatch;
-                break;
+      // 1. Line Search with Regex
+      for (const line of lines) {
+         if (new RegExp(amountKey, 'i').test(line)) {
+           const numbers = line.match(/([\d.,\s]+)/g);
+           if (numbers && numbers.length > 0) {
+             for (let i = numbers.length - 1; i >= 0; i--) {
+                const valStr = numbers[i].trim();
+                if (line.includes(valStr + '%')) continue;
+                if (valStr.length > 1) {
+                    amountMatch = [valStr, valStr]; 
+                    break;
+                }
              }
            }
-        }
+           if (amountMatch) break;
+         }
+      }
+
+      // 2. Global Fallback
+      if (!amountMatch) {
+         const amountRegex = new RegExp(`${amountKey}.{0,60}?([\\d.,\s]+)(?:\\s*[€A-ZKčzł]*)`, 'i');
+         amountMatch = singleLineText.match(amountRegex);
       }
 
       if (amountMatch) {
         const val = parseCurrency(amountMatch[1]);
         data.originalAmount = val;
         
-        if (matchedRule.currency === 'CZK') {
+        if (matchedRule.currency === 'Kč') { 
           data.amount = val / rates.CZK;
-        } else if (matchedRule.currency === 'PLN') {
+        } else if (matchedRule.currency === 'zł') { 
           data.amount = val / rates.PLN;
         } else {
           data.amount = val;
@@ -412,7 +443,7 @@ export default function App() {
             </div>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">CZK Kurs (1 EUR = ? CZK)</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">CZK Kurs (1 EUR = ? Kč)</label>
                 <input 
                   type="number" 
                   step="0.000001" 
@@ -422,7 +453,7 @@ export default function App() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">PLN Kurs (1 EUR = ? PLN)</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">PLN Kurs (1 EUR = ? zł)</label>
                 <input 
                   type="number" 
                   step="0.000001" 
