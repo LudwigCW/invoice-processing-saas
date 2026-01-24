@@ -9,7 +9,9 @@ import {
 import { 
   getFirestore, 
   collection, 
-  addDoc, 
+  addDoc,
+  deleteDoc, // NEU: Zum Löschen
+  doc,       // NEU: Referenz auf Dokument
   onSnapshot, 
   serverTimestamp 
 } from 'firebase/firestore';
@@ -23,10 +25,12 @@ import {
   AlertCircle,
   Loader2,
   Bug,
-  X
+  X,
+  Trash2 // NEU: Mülleimer Icon
 } from 'lucide-react';
 
 // --- WICHTIG: IHRE FIREBASE KONFIGURATION ---
+// Bitte hier wieder Ihre echten Daten eintragen!
 const firebaseConfig = {
   apiKey: "AIzaSyCG50HVvFxVy2UDqMr87zI9ufz-fMtkK8s",
   authDomain: "invoice-processing-autom.firebaseapp.com",
@@ -35,15 +39,14 @@ const firebaseConfig = {
   messagingSenderId: "813058723595",
   appId: "1:813058723595:web:25bb4ffe185f8461f79c0e",
   measurementId: "G-L8HJSP0DRH"
-}
-;
+};
 
 const app = firebaseConfig.apiKey !== "HIER_IHREN_API_KEY_EINFUEGEN" ? initializeApp(firebaseConfig) : null;
 const auth = app ? getAuth(app) : null;
 const db = app ? getFirestore(app) : null;
 const appId = 'invoice-saas-v1';
 
-// --- PDF.js Setup (via CDN Script Injection for reliability) ---
+// --- PDF.js Setup (via CDN) ---
 const PDFJS_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
 const PDFJS_WORKER_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
@@ -66,26 +69,24 @@ const loadPdfJs = () => {
   });
 };
 
-// --- Helper: Date Standardization ---
-const MONTH_MAP = {
-  'january': '01', 'januar': '01', 'jan': '01',
-  'february': '02', 'februar': '02', 'feb': '02',
-  'march': '03', 'märz': '03', 'maerz': '03', 'mar': '03',
-  'april': '04', 'apr': '04',
-  'may': '05', 'mai': '05',
-  'june': '06', 'juni': '06', 'jun': '06',
-  'july': '07', 'juli': '07', 'jul': '07',
-  'august': '08', 'aug': '08',
-  'september': '09', 'sep': '09',
-  'october': '10', 'oktober': '10', 'oct': '10', 'okt': '10',
-  'november': '11', 'nov': '11',
-  'december': '12', 'dezember': '12', 'dec': '12', 'dez': '12'
-};
-
 const standardizeDate = (rawDate) => {
   if (!rawDate) return '';
-  // Entferne unsichtbare Steuerzeichen und normalisiere Leerzeichen
   let clean = rawDate.replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/\s+/g, ' ');
+
+  const MONTH_MAP = {
+    'january': '01', 'januar': '01', 'jan': '01',
+    'february': '02', 'februar': '02', 'feb': '02',
+    'march': '03', 'märz': '03', 'maerz': '03', 'mar': '03',
+    'april': '04', 'apr': '04',
+    'may': '05', 'mai': '05',
+    'june': '06', 'juni': '06', 'jun': '06',
+    'july': '07', 'juli': '07', 'jul': '07',
+    'august': '08', 'aug': '08',
+    'september': '09', 'sep': '09',
+    'october': '10', 'oktober': '10', 'oct': '10', 'okt': '10',
+    'november': '11', 'nov': '11',
+    'december': '12', 'dezember': '12', 'dec': '12', 'dez': '12'
+  };
 
   // ISO (YYYY-MM-DD)
   let isoMatch = clean.match(/^(\d{4})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{1,2})$/);
@@ -115,115 +116,55 @@ const standardizeDate = (rawDate) => {
 
 const parseCurrency = (str) => {
   if (!str) return 0.0;
-  // Entferne alles außer Zahlen, Komma, Punkt und Minus
   let clean = str.replace(/[^0-9.,-]/g, ''); 
-  
   const lastCommaIndex = clean.lastIndexOf(',');
   const lastDotIndex = clean.lastIndexOf('.');
-
-  if (lastCommaIndex > lastDotIndex) { // Deutsch: 1.200,50
+  if (lastCommaIndex > lastDotIndex) {
     clean = clean.replace(/\./g, '');
     clean = clean.replace(',', '.');
-  } else { // Englisch: 1,200.50
+  } else {
     clean = clean.replace(/,/g, '');
   }
-  
   const val = parseFloat(clean);
   return isNaN(val) ? 0.0 : val;
 };
 
 // --- Configuration Rules ---
-// Alle Regeln inklusive der Italien-Logik und 8-Ziffern-Fallback
 const COUNTRY_RULES = [
   {
     id: 'IT',
     name: 'Italy',
     indicators: ['Data della fattura', 'Italien', 'Italy', 'Italia'], 
-    keywords: {
-      date: 'Data\\s*della\\s*fattura\\s*:?', 
-      number: 'Numero\\s*fattura\\s*:?', 
-      amount: 'Prezzo\\s*totale'
-    },
-    booking: {
-      text: 'Verkauf über Kaufland Italien',
-      soll: 10002,
-      haben: 4320,
-      taxKey: '240',
-      euLand: 'IT', 
-      euRate: '0.22'
-    }
+    keywords: { date: 'Data\\s*della\\s*fattura\\s*:?', number: 'Numero\\s*fattura\\s*:?', amount: 'Prezzo\\s*totale' },
+    booking: { text: 'Verkauf über Kaufland Italien', soll: 10002, haben: 4320, taxKey: '240', euLand: 'IT', euRate: '0.22' }
   },
   {
     id: 'FR',
     name: 'France',
     indicators: ['Date de facture', 'Frankreich', 'France', 'République Française'], 
-    keywords: {
-      date: 'Date\\s*(?:de)?\\s*facture', 
-      number: '(?:Num[ée.]ro|N[°o.]|Facture\\s*N[°o.]?)\\s*(?:de)?\\s*facture\\s*:?', 
-      amount: '(?:Prix\\s+|Montant\\s+)?total'
-    },
-    booking: {
-      text: 'Verkauf über Kaufland Frankreich',
-      soll: 10002,
-      haben: 4320,
-      taxKey: '240',
-      euLand: 'AT', 
-      euRate: '0.2'
-    }
+    keywords: { date: 'Date\\s*(?:de)?\\s*facture', number: '(?:Num[ée.]ro|N[°o.]|Facture\\s*N[°o.]?)\\s*(?:de)?\\s*facture\\s*:?', amount: '(?:Prix\\s+|Montant\\s+)?total' },
+    booking: { text: 'Verkauf über Kaufland Frankreich', soll: 10002, haben: 4320, taxKey: '240', euLand: 'AT', euRate: '0.2' }
   },
   {
     id: 'SK',
     name: 'Slovakia',
     indicators: ['Dátum faktúry', 'Datum faktury', 'Slowakei', 'Slovakia', 'Slovenská'],
-    keywords: {
-      date: 'tum\\s*fak', 
-      number: '(?:[ČC.]+[íi.]slo\\s*fakt[úu.]r[ya.]?|Fakt[úu.]ra\\s*[čc.]|Fakt[úu.]ra)', 
-      amount: '(?:Celkov[áa.]\\s*cena|Spolu|K\\s*úhrade)'
-    },
-    booking: {
-      text: 'Verkauf über Kaufland Slowakei',
-      soll: 10002,
-      haben: 4320,
-      taxKey: '240',
-      euLand: 'SK',
-      euRate: '0.23'
-    }
+    keywords: { date: 'tum\\s*fak', number: '(?:[ČC.]+[íi.]slo\\s*fakt[úu.]r[ya.]?|Fakt[úu.]ra\\s*[čc.]|Fakt[úu.]ra)', amount: '(?:Celkov[áa.]\\s*cena|Spolu|K\\s*úhrade)' },
+    booking: { text: 'Verkauf über Kaufland Slowakei', soll: 10002, haben: 4320, taxKey: '240', euLand: 'SK', euRate: '0.23' }
   },
   {
     id: 'AT',
     name: 'Austria',
     indicators: ['Österreich', 'Austria'], 
-    keywords: {
-      date: 'Rechnungsdatum',
-      number: 'Rechnungsnummer',
-      amount: 'Gesamtpreis'
-    },
-    booking: {
-      text: 'Verkauf über Kaufland Österreich',
-      soll: 10002,
-      haben: 4320,
-      taxKey: '240',
-      euLand: 'AT',
-      euRate: '0.2'
-    }
+    keywords: { date: 'Rechnungsdatum', number: 'Rechnungsnummer', amount: 'Gesamtpreis' },
+    booking: { text: 'Verkauf über Kaufland Österreich', soll: 10002, haben: 4320, taxKey: '240', euLand: 'AT', euRate: '0.2' }
   },
   {
     id: 'DE',
     name: 'Germany',
     indicators: ['Deutschland', 'Germany'],
-    keywords: {
-      date: 'Rechnungsdatum',
-      number: 'Rechnungsnummer',
-      amount: 'Gesamtpreis'
-    },
-    booking: {
-      text: 'Verkauf über Kaufland Deutschland',
-      soll: 10002,
-      haben: 4400,
-      taxKey: '', 
-      euLand: 'DE',
-      euRate: '0.19'
-    }
+    keywords: { date: 'Rechnungsdatum', number: 'Rechnungsnummer', amount: 'Gesamtpreis' },
+    booking: { text: 'Verkauf über Kaufland Deutschland', soll: 10002, haben: 4400, taxKey: '', euLand: 'DE', euRate: '0.19' }
   }
 ];
 
@@ -235,7 +176,7 @@ export default function App() {
   const [error, setError] = useState(null);
   const [debugMode, setDebugMode] = useState(false);
   const [lastProcessedText, setLastProcessedText] = useState("");
-  const [pdfLib, setPdfLib] = useState(null); // State for the library
+  const [pdfLib, setPdfLib] = useState(null);
 
   if (!app) {
     return (
@@ -247,7 +188,7 @@ export default function App() {
     );
   }
 
-  // Initialize Auth
+  // Auth Init
   useEffect(() => {
     signInAnonymously(auth).catch(err => console.error("Auth Error", err));
     const unsubscribe = onAuthStateChanged(auth, (u) => {
@@ -257,12 +198,12 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Initialize PDF.js via CDN
+  // PDF.js Load
   useEffect(() => {
     loadPdfJs().then(lib => setPdfLib(lib)).catch(err => console.error("Failed to load PDF.js", err));
   }, []);
 
-  // Listen for Invoices
+  // Invoices Sync
   useEffect(() => {
     if (!user) {
       setInvoices([]);
@@ -280,26 +221,34 @@ export default function App() {
     return () => unsubscribe();
   }, [user]);
 
+  // --- DELETE FUNCTION ---
+  const handleDelete = async (invoiceId) => {
+    if (!user) return;
+    if (window.confirm("Möchten Sie diesen Eintrag wirklich löschen?")) {
+      try {
+        await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'invoices', invoiceId));
+      } catch (err) {
+        console.error("Delete Error:", err);
+        setError("Löschen fehlgeschlagen: " + err.message);
+      }
+    }
+  };
+
   const processInvoice = async (file) => {
     if (!pdfLib) {
-        setError("PDF-Bibliothek noch nicht geladen. Bitte warten.");
+        setError("PDF-System noch nicht bereit. Bitte warten.");
         return;
     }
-
     try {
       const arrayBuffer = await file.arrayBuffer();
-      // Use the window.pdfjsLib object we loaded via CDN
       const loadingTask = pdfLib.getDocument({
         data: arrayBuffer,
-        cMapUrl: 'https://unpkg.com/pdfjs-dist@3.11.174/cmaps/', 
+        cMapUrl: 'https://unpkg.com/pdfjs-dist@3.11.174/cmaps/',
         cMapPacked: true,
       });
-      
       const pdf = await loadingTask.promise;
       const page = await pdf.getPage(1);
       const textContent = await page.getTextContent();
-      
-      // Text-Items bereinigen und zusammenfügen
       const textItems = textContent.items.map(item => item.str);
       const text = textItems.join('\n'); 
       const singleLineText = textItems.join(' '); 
@@ -307,7 +256,7 @@ export default function App() {
       setLastProcessedText(text);
       console.log(`Processing ${file.name}...`); 
 
-      // 1. Detect Country
+      // 1. Country Rule
       let matchedRule = null;
       if (/Data\s*della\s*fattura/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'IT');
       else if (/Date\s*(?:de)?\s*facture/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'FR');
@@ -338,7 +287,7 @@ export default function App() {
         createdAt: serverTimestamp()
       };
 
-      // DATE Extraction
+      // DATE
       const dateKey = matchedRule.keywords.date;
       const dateRegex = new RegExp(
         `${dateKey}.{0,40}?(\\d{4}\\s*[./-]\\s*\\d{1,2}\\s*[./-]\\s*\\d{1,2}|\\d{1,2}\\s*[./-]\\s*\\d{1,2}\\s*[./-]\\s*\\d{4}|\\d{1,2}\\.?\\s*[a-zA-ZäöüÄÖÜ]+\\s*\\d{4})`, 
@@ -349,16 +298,14 @@ export default function App() {
       if (dateMatch) {
         data.date = standardizeDate(dateMatch[1]);
       } else {
-        // Global Fallback for ISO Date
         const globalIso = text.match(/\b(\d{4})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{1,2})\b/);
         if (globalIso) data.date = standardizeDate(globalIso[0]);
       }
 
-      // NUMBER Extraction
+      // NUMBER
       const numKey = matchedRule.keywords.number;
       const strictNumRegex = new RegExp(`${numKey}.{0,20}?([A-Za-z0-9\\-/]*\\d+[A-Za-z0-9\\-/]*)`, 'i');
       let numMatch = null;
-      // Line by line priority
       const lines = text.split('\n');
       for (const line of lines) {
         numMatch = line.match(strictNumRegex);
@@ -369,14 +316,13 @@ export default function App() {
         numMatch = singleLineText.match(looseNumRegex);
       }
       if (numMatch) data.invoiceNumber = numMatch[1];
-      
       // 8-Digit Fallback
       if (!data.invoiceNumber || !/^\d{8}$/.test(data.invoiceNumber)) {
         const eightDigitMatch = text.match(/\b(\d{8})\b/);
         if (eightDigitMatch) data.invoiceNumber = eightDigitMatch[1];
       }
 
-      // AMOUNT Extraction
+      // AMOUNT
       const amountKey = matchedRule.keywords.amount;
       const amountRegex = new RegExp(`${amountKey}.{0,60}?([\\d.,]+)\\s*[€A-Z]*`, 'i');
       let amountMatch = singleLineText.match(amountRegex);
@@ -478,9 +424,9 @@ export default function App() {
         <div className="overflow-hidden rounded-xl bg-white shadow-sm border border-gray-200">
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50"><tr>{['Land', 'Datum', 'Beleg Nr.', 'Betrag', 'Soll / Haben', 'Steuer', 'EU Info'].map(h => (<th key={h} className="px-6 py-3 text-left text-xs font-medium uppercase text-gray-500">{h}</th>))}</tr></thead>
+              <thead className="bg-gray-50"><tr>{['Land', 'Datum', 'Beleg Nr.', 'Betrag', 'Soll / Haben', 'Steuer', 'EU Info', ''].map(h => (<th key={h} className="px-6 py-3 text-left text-xs font-medium uppercase text-gray-500">{h}</th>))}</tr></thead>
               <tbody className="divide-y divide-gray-200 bg-white">
-                {invoices.length === 0 ? <tr><td colSpan="7" className="px-6 py-12 text-center text-gray-500">Keine Daten.</td></tr> : invoices.map(inv => (
+                {invoices.length === 0 ? <tr><td colSpan="8" className="px-6 py-12 text-center text-gray-500">Keine Daten.</td></tr> : invoices.map(inv => (
                   <tr key={inv.id} className="hover:bg-gray-50">
                     <td className="whitespace-nowrap px-6 py-4 text-sm font-bold">{inv.countryId}</td>
                     <td className="whitespace-nowrap px-6 py-4 text-sm">{inv.date}</td>
@@ -489,6 +435,9 @@ export default function App() {
                     <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-500">{inv.sollkonto} / {inv.habenkonto}</td>
                     <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-500">{inv.taxKey || '-'}</td>
                     <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-500">{inv.euLand} ({inv.euRate})</td>
+                    <td className="whitespace-nowrap px-6 py-4 text-sm text-right">
+                      <button onClick={() => handleDelete(inv.id)} className="text-red-500 hover:text-red-700 p-1" title="Löschen"><Trash2 className="h-5 w-5" /></button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
