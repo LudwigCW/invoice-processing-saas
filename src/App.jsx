@@ -9,9 +9,10 @@ import {
 import { 
   getFirestore, 
   collection, 
-  addDoc,
-  deleteDoc, // NEU: Zum Löschen
-  doc,       // NEU: Referenz auf Dokument
+  addDoc, 
+  deleteDoc,
+  doc,
+  writeBatch, // NEU: Für Massen-Löschung
   onSnapshot, 
   serverTimestamp 
 } from 'firebase/firestore';
@@ -26,11 +27,10 @@ import {
   Loader2,
   Bug,
   X,
-  Trash2 // NEU: Mülleimer Icon
+  Trash2
 } from 'lucide-react';
 
 // --- WICHTIG: IHRE FIREBASE KONFIGURATION ---
-// Bitte hier wieder Ihre echten Daten eintragen!
 const firebaseConfig = {
   apiKey: "AIzaSyCG50HVvFxVy2UDqMr87zI9ufz-fMtkK8s",
   authDomain: "invoice-processing-autom.firebaseapp.com",
@@ -41,6 +41,7 @@ const firebaseConfig = {
   measurementId: "G-L8HJSP0DRH"
 };
 
+// Initialisiere Firebase nur, wenn Config vorhanden ist
 const app = firebaseConfig.apiKey !== "HIER_IHREN_API_KEY_EINFUEGEN" ? initializeApp(firebaseConfig) : null;
 const auth = app ? getAuth(app) : null;
 const db = app ? getFirestore(app) : null;
@@ -71,6 +72,7 @@ const loadPdfJs = () => {
 
 const standardizeDate = (rawDate) => {
   if (!rawDate) return '';
+  // Entferne unsichtbare Steuerzeichen und normalisiere Leerzeichen
   let clean = rawDate.replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/\s+/g, ' ');
 
   const MONTH_MAP = {
@@ -88,14 +90,14 @@ const standardizeDate = (rawDate) => {
     'december': '12', 'dezember': '12', 'dec': '12', 'dez': '12'
   };
 
-  // ISO (YYYY-MM-DD)
+  // ISO Format (YYYY - MM - DD) - Toleriert Leerzeichen
   let isoMatch = clean.match(/^(\d{4})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{1,2})$/);
   if (isoMatch) {
     const [_, y, m, d] = isoMatch;
     return `${d.padStart(2, '0')}.${m.padStart(2, '0')}.${y}`;
   }
 
-  // Textual (DD. Month YYYY)
+  // Text Format (DD. Month YYYY)
   let textMatch = clean.match(/^(\d{1,2})\.?\s+([a-zA-ZäöüÄÖÜ]+)\s+(\d{4})$/);
   if (textMatch) {
     const [_, d, monthStr, y] = textMatch;
@@ -104,7 +106,7 @@ const standardizeDate = (rawDate) => {
     if (m) return `${d.padStart(2, '0')}.${m}.${y}`;
   }
 
-  // Standard (DD.MM.YYYY)
+  // Standard Format (DD . MM . YYYY) - Toleriert Leerzeichen
   let numMatch = clean.match(/^(\d{1,2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{4})$/);
   if (numMatch) {
     const [_, d, m, y] = numMatch;
@@ -116,25 +118,30 @@ const standardizeDate = (rawDate) => {
 
 const parseCurrency = (str) => {
   if (!str) return 0.0;
+  // Entferne alles außer Zahlen, Komma, Punkt und Minus
   let clean = str.replace(/[^0-9.,-]/g, ''); 
+  
   const lastCommaIndex = clean.lastIndexOf(',');
   const lastDotIndex = clean.lastIndexOf('.');
-  if (lastCommaIndex > lastDotIndex) {
+
+  if (lastCommaIndex > lastDotIndex) { // Deutsch: 1.200,50
     clean = clean.replace(/\./g, '');
     clean = clean.replace(',', '.');
-  } else {
+  } else { // Englisch: 1,200.50
     clean = clean.replace(/,/g, '');
   }
+  
   const val = parseFloat(clean);
   return isNaN(val) ? 0.0 : val;
 };
 
-// --- Configuration Rules ---
+// --- Länderregeln & Suchlogik ---
 const COUNTRY_RULES = [
   {
     id: 'IT',
     name: 'Italy',
     indicators: ['Data della fattura', 'Italien', 'Italy', 'Italia'], 
+    // Datum erlaubt optionalen Doppelpunkt
     keywords: { date: 'Data\\s*della\\s*fattura\\s*:?', number: 'Numero\\s*fattura\\s*:?', amount: 'Prezzo\\s*totale' },
     booking: { text: 'Verkauf über Kaufland Italien', soll: 10002, haben: 4320, taxKey: '240', euLand: 'IT', euRate: '0.22' }
   },
@@ -198,7 +205,7 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // PDF.js Load
+  // PDF.js Load via CDN
   useEffect(() => {
     loadPdfJs().then(lib => setPdfLib(lib)).catch(err => console.error("Failed to load PDF.js", err));
   }, []);
@@ -221,7 +228,7 @@ export default function App() {
     return () => unsubscribe();
   }, [user]);
 
-  // --- DELETE FUNCTION ---
+  // --- EINZELN LÖSCHEN ---
   const handleDelete = async (invoiceId) => {
     if (!user) return;
     if (window.confirm("Möchten Sie diesen Eintrag wirklich löschen?")) {
@@ -234,6 +241,38 @@ export default function App() {
     }
   };
 
+  // --- ALLES LÖSCHEN (NEU) ---
+  const handleDeleteAll = async () => {
+    if (!user || invoices.length === 0) return;
+    
+    // Sicherheitsabfrage
+    if (window.confirm(`WARNUNG: Sind Sie sicher, dass Sie ALLE ${invoices.length} Einträge endgültig löschen möchten? Dies kann nicht rückgängig gemacht werden.`)) {
+      setProcessing(true);
+      try {
+        // Firebase erlaubt max. 500 Operationen pro Batch.
+        // Wir nehmen hier die ersten 500 (für MVP ausreichend).
+        const batch = writeBatch(db);
+        const chunk = invoices.slice(0, 500); 
+        
+        chunk.forEach(inv => {
+          const ref = doc(db, 'artifacts', appId, 'users', user.uid, 'invoices', inv.id);
+          batch.delete(ref);
+        });
+
+        await batch.commit();
+        
+        if (invoices.length > 500) {
+             setError("Die ersten 500 Einträge wurden gelöscht. Bitte wiederholen Sie den Vorgang für den Rest.");
+        }
+      } catch (err) {
+        console.error("Batch Delete Error:", err);
+        setError("Fehler beim Massen-Löschen: " + err.message);
+      } finally {
+        setProcessing(false);
+      }
+    }
+  };
+
   const processInvoice = async (file) => {
     if (!pdfLib) {
         setError("PDF-System noch nicht bereit. Bitte warten.");
@@ -241,6 +280,7 @@ export default function App() {
     }
     try {
       const arrayBuffer = await file.arrayBuffer();
+      // Configure CDN Worker
       const loadingTask = pdfLib.getDocument({
         data: arrayBuffer,
         cMapUrl: 'https://unpkg.com/pdfjs-dist@3.11.174/cmaps/',
@@ -256,7 +296,7 @@ export default function App() {
       setLastProcessedText(text);
       console.log(`Processing ${file.name}...`); 
 
-      // 1. Country Rule
+      // 1. Detect Country
       let matchedRule = null;
       if (/Data\s*della\s*fattura/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'IT');
       else if (/Date\s*(?:de)?\s*facture/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'FR');
@@ -298,6 +338,7 @@ export default function App() {
       if (dateMatch) {
         data.date = standardizeDate(dateMatch[1]);
       } else {
+        // Global Fallback for ISO Date
         const globalIso = text.match(/\b(\d{4})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{1,2})\b/);
         if (globalIso) data.date = standardizeDate(globalIso[0]);
       }
@@ -410,7 +451,20 @@ export default function App() {
         <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
           <div className="rounded-xl bg-white p-6 shadow-sm border border-gray-100"><div className="flex justify-between"><div><p className="text-sm font-medium text-gray-500">Rechnungen</p><p className="mt-1 text-3xl font-bold">{invoices.length}</p></div><CheckCircle className="h-6 w-6 text-green-600" /></div></div>
           <div className="rounded-xl bg-white p-6 shadow-sm border border-gray-100"><div className="flex justify-between"><div><p className="text-sm font-medium text-gray-500">Volumen</p><p className="mt-1 text-3xl font-bold">{invoices.reduce((acc, curr) => acc + (curr.amount || 0), 0).toFixed(2)} €</p></div><Activity className="h-6 w-6 text-blue-600" /></div></div>
-          <div className="rounded-xl bg-indigo-600 p-6 shadow-sm text-white flex flex-col justify-between"><div><p className="text-sm font-medium text-indigo-100">Export</p><h3 className="mt-1 text-xl font-bold">CSV</h3></div><button onClick={downloadCSV} disabled={invoices.length===0} className="mt-4 flex w-full justify-center gap-2 rounded-lg bg-white/20 py-2 text-sm font-semibold transition hover:bg-white/30 disabled:opacity-50"><Download className="h-4 w-4" /> Download</button></div>
+          <div className="rounded-xl bg-indigo-600 p-6 shadow-sm text-white flex flex-col gap-4">
+            <div>
+              <p className="text-sm font-medium text-indigo-100">Daten</p>
+              <h3 className="mt-1 text-xl font-bold">Verwaltung</h3>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={downloadCSV} disabled={invoices.length===0} className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-white/20 py-2 text-sm font-semibold transition hover:bg-white/30 disabled:opacity-50">
+                <Download className="h-4 w-4" /> CSV
+              </button>
+              <button onClick={handleDeleteAll} disabled={invoices.length===0 || processing} className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-red-500/80 py-2 text-sm font-semibold transition hover:bg-red-500 disabled:opacity-50">
+                <Trash2 className="h-4 w-4" /> Alle
+              </button>
+            </div>
+          </div>
         </div>
         <div className="mb-8 rounded-xl border-2 border-dashed border-gray-300 bg-white p-8 text-center">
           <div className="flex flex-col items-center">
@@ -435,9 +489,7 @@ export default function App() {
                     <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-500">{inv.sollkonto} / {inv.habenkonto}</td>
                     <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-500">{inv.taxKey || '-'}</td>
                     <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-500">{inv.euLand} ({inv.euRate})</td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm text-right">
-                      <button onClick={() => handleDelete(inv.id)} className="text-red-500 hover:text-red-700 p-1" title="Löschen"><Trash2 className="h-5 w-5" /></button>
-                    </td>
+                    <td className="whitespace-nowrap px-6 py-4 text-sm text-right"><button onClick={() => handleDelete(inv.id)} className="text-red-500 hover:text-red-700 p-1"><Trash2 className="h-5 w-5" /></button></td>
                   </tr>
                 ))}
               </tbody>
