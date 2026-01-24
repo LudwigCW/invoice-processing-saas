@@ -12,7 +12,7 @@ import {
   addDoc, 
   deleteDoc,
   doc,
-  writeBatch, // NEU: Für Massen-Löschung
+  writeBatch, 
   onSnapshot, 
   serverTimestamp 
 } from 'firebase/firestore';
@@ -27,7 +27,9 @@ import {
   Loader2,
   Bug,
   X,
-  Trash2
+  Trash2,
+  Settings,
+  Save
 } from 'lucide-react';
 
 // --- WICHTIG: IHRE FIREBASE KONFIGURATION ---
@@ -41,7 +43,6 @@ const firebaseConfig = {
   measurementId: "G-L8HJSP0DRH"
 };
 
-// Initialisiere Firebase nur, wenn Config vorhanden ist
 const app = firebaseConfig.apiKey !== "HIER_IHREN_API_KEY_EINFUEGEN" ? initializeApp(firebaseConfig) : null;
 const auth = app ? getAuth(app) : null;
 const db = app ? getFirestore(app) : null;
@@ -50,6 +51,12 @@ const appId = 'invoice-saas-v1';
 // --- PDF.js Setup (via CDN) ---
 const PDFJS_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
 const PDFJS_WORKER_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+// --- Standardwerte für Währungskurse ---
+const DEFAULT_RATES = {
+  CZK: 24.247655,
+  PLN: 4.213986
+};
 
 // --- Helper Functions ---
 
@@ -72,33 +79,27 @@ const loadPdfJs = () => {
 
 const standardizeDate = (rawDate) => {
   if (!rawDate) return '';
-  // Entferne unsichtbare Steuerzeichen und normalisiere Leerzeichen
   let clean = rawDate.replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/\s+/g, ' ');
 
   const MONTH_MAP = {
-    'january': '01', 'januar': '01', 'jan': '01',
-    'february': '02', 'februar': '02', 'feb': '02',
-    'march': '03', 'märz': '03', 'maerz': '03', 'mar': '03',
-    'april': '04', 'apr': '04',
-    'may': '05', 'mai': '05',
-    'june': '06', 'juni': '06', 'jun': '06',
-    'july': '07', 'juli': '07', 'jul': '07',
-    'august': '08', 'aug': '08',
-    'september': '09', 'sep': '09',
-    'october': '10', 'oktober': '10', 'oct': '10', 'okt': '10',
-    'november': '11', 'nov': '11',
-    'december': '12', 'dezember': '12', 'dec': '12', 'dez': '12'
+    'january': '01', 'januar': '01', 'jan': '01', 'ledna': '01', 'stycznia': '01',
+    'february': '02', 'februar': '02', 'feb': '02', 'února': '02', 'lutego': '02',
+    'march': '03', 'märz': '03', 'maerz': '03', 'mar': '03', 'března': '03', 'marca': '03',
+    'april': '04', 'apr': '04', 'dubna': '04', 'kwietnia': '04',
+    'may': '05', 'mai': '05', 'května': '05', 'maja': '05',
+    'june': '06', 'juni': '06', 'jun': '06', 'června': '06', 'czerwca': '06',
+    'july': '07', 'juli': '07', 'jul': '07', 'července': '07', 'lipca': '07',
+    'august': '08', 'aug': '08', 'srpna': '08', 'sierpnia': '08',
+    'september': '09', 'sep': '09', 'září': '09', 'września': '09',
+    'october': '10', 'oktober': '10', 'oct': '10', 'okt': '10', 'října': '10', 'października': '10',
+    'november': '11', 'nov': '11', 'listopadu': '11', 'listopada': '11',
+    'december': '12', 'dezember': '12', 'dec': '12', 'dez': '12', 'prosince': '12', 'grudnia': '12'
   };
 
-  // ISO Format (YYYY - MM - DD) - Toleriert Leerzeichen
   let isoMatch = clean.match(/^(\d{4})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{1,2})$/);
-  if (isoMatch) {
-    const [_, y, m, d] = isoMatch;
-    return `${d.padStart(2, '0')}.${m.padStart(2, '0')}.${y}`;
-  }
+  if (isoMatch) return `${isoMatch[3].padStart(2, '0')}.${isoMatch[2].padStart(2, '0')}.${isoMatch[1]}`;
 
-  // Text Format (DD. Month YYYY)
-  let textMatch = clean.match(/^(\d{1,2})\.?\s+([a-zA-ZäöüÄÖÜ]+)\s+(\d{4})$/);
+  let textMatch = clean.match(/^(\d{1,2})\.?\s+([a-zA-ZäöüÄÖÜáčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ]+)\s+(\d{4})$/);
   if (textMatch) {
     const [_, d, monthStr, y] = textMatch;
     const monthKey = monthStr.toLowerCase().replace('.', ''); 
@@ -106,28 +107,23 @@ const standardizeDate = (rawDate) => {
     if (m) return `${d.padStart(2, '0')}.${m}.${y}`;
   }
 
-  // Standard Format (DD . MM . YYYY) - Toleriert Leerzeichen
   let numMatch = clean.match(/^(\d{1,2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{4})$/);
-  if (numMatch) {
-    const [_, d, m, y] = numMatch;
-    return `${d.padStart(2, '0')}.${m.padStart(2, '0')}.${y}`;
-  }
+  if (numMatch) return `${numMatch[1].padStart(2, '0')}.${numMatch[2].padStart(2, '0')}.${numMatch[3]}`;
 
   return clean;
 };
 
 const parseCurrency = (str) => {
   if (!str) return 0.0;
-  // Entferne alles außer Zahlen, Komma, Punkt und Minus
   let clean = str.replace(/[^0-9.,-]/g, ''); 
   
   const lastCommaIndex = clean.lastIndexOf(',');
   const lastDotIndex = clean.lastIndexOf('.');
 
-  if (lastCommaIndex > lastDotIndex) { // Deutsch: 1.200,50
+  if (lastCommaIndex > lastDotIndex) { 
     clean = clean.replace(/\./g, '');
     clean = clean.replace(',', '.');
-  } else { // Englisch: 1,200.50
+  } else { 
     clean = clean.replace(/,/g, '');
   }
   
@@ -135,13 +131,37 @@ const parseCurrency = (str) => {
   return isNaN(val) ? 0.0 : val;
 };
 
-// --- Länderregeln & Suchlogik ---
+// --- Länderregeln (Aktualisiert für CZ und PL basierend auf CSV) ---
 const COUNTRY_RULES = [
+  {
+    id: 'CZ',
+    name: 'Czech Republic',
+    indicators: ['Česká republika', 'Czech', 'Faktura', 'DIČ', 'IČO'],
+    currency: 'CZK',
+    keywords: {
+      date: 'Datum\\s*faktury\\s*:?', // Aktualisiert aus CSV
+      number: 'Číslo\\s*faktury\\s*:?', // Aktualisiert aus CSV
+      amount: '(?:Celková\\s*cena\\s*všech\\s*článků|Celkem\\s*k\\s*úhradě|K\\s*úhradě)' // Aktualisiert + Fallback
+    },
+    booking: { text: 'Verkauf über Kaufland Tschechien', soll: 10002, haben: 4320, taxKey: '240', euLand: 'CZ', euRate: '0.21' }
+  },
+  {
+    id: 'PL',
+    name: 'Poland',
+    indicators: ['Polska', 'Poland', 'Faktura VAT', 'NIP', 'PL'],
+    currency: 'PLN',
+    keywords: {
+      date: 'Data\\s*faktury\\s*:?', // Aktualisiert aus CSV
+      number: 'Numer\\s*rachunku\\s*:?', // Aktualisiert aus CSV
+      amount: '(?:Do\\s*zapłaty|Razem\\s*brutto|Kwota\\s*do\\s*zapłaty|Suma)'
+    },
+    booking: { text: 'Verkauf über Kaufland Polen', soll: 10002, haben: 4320, taxKey: '240', euLand: 'PL', euRate: '0.23' }
+  },
   {
     id: 'IT',
     name: 'Italy',
     indicators: ['Data della fattura', 'Italien', 'Italy', 'Italia'], 
-    // Datum erlaubt optionalen Doppelpunkt
+    currency: 'EUR',
     keywords: { date: 'Data\\s*della\\s*fattura\\s*:?', number: 'Numero\\s*fattura\\s*:?', amount: 'Prezzo\\s*totale' },
     booking: { text: 'Verkauf über Kaufland Italien', soll: 10002, haben: 4320, taxKey: '240', euLand: 'IT', euRate: '0.22' }
   },
@@ -149,6 +169,7 @@ const COUNTRY_RULES = [
     id: 'FR',
     name: 'France',
     indicators: ['Date de facture', 'Frankreich', 'France', 'République Française'], 
+    currency: 'EUR',
     keywords: { date: 'Date\\s*(?:de)?\\s*facture', number: '(?:Num[ée.]ro|N[°o.]|Facture\\s*N[°o.]?)\\s*(?:de)?\\s*facture\\s*:?', amount: '(?:Prix\\s+|Montant\\s+)?total' },
     booking: { text: 'Verkauf über Kaufland Frankreich', soll: 10002, haben: 4320, taxKey: '240', euLand: 'AT', euRate: '0.2' }
   },
@@ -156,6 +177,7 @@ const COUNTRY_RULES = [
     id: 'SK',
     name: 'Slovakia',
     indicators: ['Dátum faktúry', 'Datum faktury', 'Slowakei', 'Slovakia', 'Slovenská'],
+    currency: 'EUR',
     keywords: { date: 'tum\\s*fak', number: '(?:[ČC.]+[íi.]slo\\s*fakt[úu.]r[ya.]?|Fakt[úu.]ra\\s*[čc.]|Fakt[úu.]ra)', amount: '(?:Celkov[áa.]\\s*cena|Spolu|K\\s*úhrade)' },
     booking: { text: 'Verkauf über Kaufland Slowakei', soll: 10002, haben: 4320, taxKey: '240', euLand: 'SK', euRate: '0.23' }
   },
@@ -163,6 +185,7 @@ const COUNTRY_RULES = [
     id: 'AT',
     name: 'Austria',
     indicators: ['Österreich', 'Austria'], 
+    currency: 'EUR',
     keywords: { date: 'Rechnungsdatum', number: 'Rechnungsnummer', amount: 'Gesamtpreis' },
     booking: { text: 'Verkauf über Kaufland Österreich', soll: 10002, haben: 4320, taxKey: '240', euLand: 'AT', euRate: '0.2' }
   },
@@ -170,6 +193,7 @@ const COUNTRY_RULES = [
     id: 'DE',
     name: 'Germany',
     indicators: ['Deutschland', 'Germany'],
+    currency: 'EUR',
     keywords: { date: 'Rechnungsdatum', number: 'Rechnungsnummer', amount: 'Gesamtpreis' },
     booking: { text: 'Verkauf über Kaufland Deutschland', soll: 10002, haben: 4400, taxKey: '', euLand: 'DE', euRate: '0.19' }
   }
@@ -184,130 +208,89 @@ export default function App() {
   const [debugMode, setDebugMode] = useState(false);
   const [lastProcessedText, setLastProcessedText] = useState("");
   const [pdfLib, setPdfLib] = useState(null);
+  
+  // States für Einstellungen
+  const [showSettings, setShowSettings] = useState(false);
+  const [rates, setRates] = useState(() => {
+    // Lade gespeicherte Kurse oder nimm Defaults
+    const saved = localStorage.getItem('exchangeRates');
+    return saved ? JSON.parse(saved) : DEFAULT_RATES;
+  });
 
-  if (!app) {
-    return (
-      <div className="flex h-screen items-center justify-center p-8 bg-red-50 text-red-800 flex-col text-center">
-        <AlertCircle className="h-12 w-12 mb-4" />
-        <h1 className="text-2xl font-bold mb-2">Firebase Konfiguration fehlt</h1>
-        <p>Bitte fügen Sie Ihre Firebase-Daten in <code>src/App.jsx</code> ein.</p>
-      </div>
-    );
-  }
+  if (!app) return <div className="p-8 text-red-800">Firebase Config fehlt!</div>;
 
-  // Auth Init
+  // Speichere Kurse bei Änderung
   useEffect(() => {
-    signInAnonymously(auth).catch(err => console.error("Auth Error", err));
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
+    localStorage.setItem('exchangeRates', JSON.stringify(rates));
+  }, [rates]);
 
-  // PDF.js Load via CDN
+  // Auth & PDF Init
   useEffect(() => {
-    loadPdfJs().then(lib => setPdfLib(lib)).catch(err => console.error("Failed to load PDF.js", err));
+    signInAnonymously(auth).catch(console.error);
+    onAuthStateChanged(auth, u => { setUser(u); setLoading(false); });
+    loadPdfJs().then(setPdfLib).catch(console.error);
   }, []);
 
   // Invoices Sync
   useEffect(() => {
-    if (!user) {
-      setInvoices([]);
-      return;
-    }
+    if (!user) { setInvoices([]); return; }
     const q = collection(db, 'artifacts', appId, 'users', user.uid, 'invoices');
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    return onSnapshot(q, snap => {
+      const data = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       data.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
       setInvoices(data);
-    }, (err) => {
-      console.error("Firestore error:", err);
-      setError("Verbindung zur Datenbank fehlgeschlagen.");
-    });
-    return () => unsubscribe();
+    }, err => setError("DB Fehler: " + err.message));
   }, [user]);
 
-  // --- EINZELN LÖSCHEN ---
-  const handleDelete = async (invoiceId) => {
-    if (!user) return;
-    if (window.confirm("Möchten Sie diesen Eintrag wirklich löschen?")) {
-      try {
-        await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'invoices', invoiceId));
-      } catch (err) {
-        console.error("Delete Error:", err);
-        setError("Löschen fehlgeschlagen: " + err.message);
-      }
-    }
+  const handleDelete = async (id) => {
+    if (window.confirm("Löschen?")) deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'invoices', id));
   };
 
-  // --- ALLES LÖSCHEN (NEU) ---
   const handleDeleteAll = async () => {
     if (!user || invoices.length === 0) return;
-    
-    // Sicherheitsabfrage
-    if (window.confirm(`WARNUNG: Sind Sie sicher, dass Sie ALLE ${invoices.length} Einträge endgültig löschen möchten? Dies kann nicht rückgängig gemacht werden.`)) {
+    if (window.confirm(`Alle ${invoices.length} löschen?`)) {
       setProcessing(true);
       try {
-        // Firebase erlaubt max. 500 Operationen pro Batch.
-        // Wir nehmen hier die ersten 500 (für MVP ausreichend).
         const batch = writeBatch(db);
-        const chunk = invoices.slice(0, 500); 
-        
-        chunk.forEach(inv => {
-          const ref = doc(db, 'artifacts', appId, 'users', user.uid, 'invoices', inv.id);
-          batch.delete(ref);
-        });
-
+        invoices.slice(0, 500).forEach(inv => batch.delete(doc(db, 'artifacts', appId, 'users', user.uid, 'invoices', inv.id)));
         await batch.commit();
-        
-        if (invoices.length > 500) {
-             setError("Die ersten 500 Einträge wurden gelöscht. Bitte wiederholen Sie den Vorgang für den Rest.");
-        }
-      } catch (err) {
-        console.error("Batch Delete Error:", err);
-        setError("Fehler beim Massen-Löschen: " + err.message);
-      } finally {
-        setProcessing(false);
-      }
+      } catch (err) { setError("Fehler: " + err.message); }
+      setProcessing(false);
     }
   };
 
   const processInvoice = async (file) => {
-    if (!pdfLib) {
-        setError("PDF-System noch nicht bereit. Bitte warten.");
-        return;
-    }
+    if (!pdfLib) return;
     try {
       const arrayBuffer = await file.arrayBuffer();
-      // Configure CDN Worker
-      const loadingTask = pdfLib.getDocument({
-        data: arrayBuffer,
-        cMapUrl: 'https://unpkg.com/pdfjs-dist@3.11.174/cmaps/',
-        cMapPacked: true,
-      });
+      const loadingTask = pdfLib.getDocument({ data: arrayBuffer, cMapUrl: 'https://unpkg.com/pdfjs-dist@3.11.174/cmaps/', cMapPacked: true });
       const pdf = await loadingTask.promise;
       const page = await pdf.getPage(1);
       const textContent = await page.getTextContent();
-      const textItems = textContent.items.map(item => item.str);
-      const text = textItems.join('\n'); 
-      const singleLineText = textItems.join(' '); 
-
+      const text = textContent.items.map(i => i.str).join('\n');
+      const singleLineText = textContent.items.map(i => i.str).join(' ');
+      
       setLastProcessedText(text);
-      console.log(`Processing ${file.name}...`); 
 
       // 1. Detect Country
       let matchedRule = null;
-      if (/Data\s*della\s*fattura/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'IT');
+      // Priorität für spezifische Keywords aus CSV
+      if (/Datum\s*faktury/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'CZ');
+      else if (/Data\s*faktury|Numer\s*rachunku/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'PL');
+      else if (/Data\s*della\s*fattura/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'IT');
       else if (/Date\s*(?:de)?\s*facture/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'FR');
       else if (/D[áa.]tum\s*(?:vyhotovenia|fakt[úu.]ry)/i.test(text) || /tum\s*fak/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'SK');
       else if (/Rechnungsdatum/i.test(text)) {
         matchedRule = (/Österreich|Austria/i.test(text)) ? COUNTRY_RULES.find(r => r.id === 'AT') : COUNTRY_RULES.find(r => r.id === 'DE');
       }
+      
+      // Fallback Ländersuche
       if (!matchedRule) {
         if (/Italia|Italy|Italien/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'IT');
         else if (/France|Frankreich|République/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'FR');
         else if (/Slovakia|Slowakei|Slovenská/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'SK');
+        else if (/Polska|Poland/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'PL');
+        else if (/Česká|Czech/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'CZ');
         else if (/Austria|Österreich/i.test(text)) matchedRule = COUNTRY_RULES.find(r => r.id === 'AT');
         else matchedRule = COUNTRY_RULES.find(r => r.id === 'DE');
       }
@@ -315,9 +298,11 @@ export default function App() {
       const data = {
         filename: file.name,
         countryId: matchedRule.id,
+        currency: matchedRule.currency,
         invoiceNumber: '',
         date: '',
         amount: 0.0,
+        originalAmount: 0.0,
         sollkonto: matchedRule.booking.soll,
         habenkonto: matchedRule.booking.haben,
         bookingText: matchedRule.booking.text,
@@ -329,16 +314,10 @@ export default function App() {
 
       // DATE
       const dateKey = matchedRule.keywords.date;
-      const dateRegex = new RegExp(
-        `${dateKey}.{0,40}?(\\d{4}\\s*[./-]\\s*\\d{1,2}\\s*[./-]\\s*\\d{1,2}|\\d{1,2}\\s*[./-]\\s*\\d{1,2}\\s*[./-]\\s*\\d{4}|\\d{1,2}\\.?\\s*[a-zA-ZäöüÄÖÜ]+\\s*\\d{4})`, 
-        'i'
-      );
-      let dateMatch = singleLineText.match(dateRegex);
-      if (!dateMatch) dateMatch = text.match(dateRegex);
-      if (dateMatch) {
-        data.date = standardizeDate(dateMatch[1]);
-      } else {
-        // Global Fallback for ISO Date
+      const dateRegex = new RegExp(`${dateKey}.{0,40}?(\\d{4}\\s*[./-]\\s*\\d{1,2}\\s*[./-]\\s*\\d{1,2}|\\d{1,2}\\s*[./-]\\s*\\d{1,2}\\s*[./-]\\s*\\d{4}|\\d{1,2}\\.?\\s*[a-zA-ZäöüÄÖÜáčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ]+\\s*\\d{4})`, 'i');
+      let dateMatch = singleLineText.match(dateRegex) || text.match(dateRegex);
+      if (dateMatch) data.date = standardizeDate(dateMatch[1]);
+      else {
         const globalIso = text.match(/\b(\d{4})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{1,2})\b/);
         if (globalIso) data.date = standardizeDate(globalIso[0]);
       }
@@ -348,148 +327,195 @@ export default function App() {
       const strictNumRegex = new RegExp(`${numKey}.{0,20}?([A-Za-z0-9\\-/]*\\d+[A-Za-z0-9\\-/]*)`, 'i');
       let numMatch = null;
       const lines = text.split('\n');
-      for (const line of lines) {
-        numMatch = line.match(strictNumRegex);
-        if (numMatch) break;
-      }
-      if (!numMatch) {
-        const looseNumRegex = new RegExp(`${numKey}.{0,40}?([A-Za-z0-9\\-/]*\\d+[A-Za-z0-9\\-/]*)`, 'i');
-        numMatch = singleLineText.match(looseNumRegex);
-      }
+      for (const line of lines) { numMatch = line.match(strictNumRegex); if (numMatch) break; }
+      if (!numMatch) numMatch = singleLineText.match(new RegExp(`${numKey}.{0,40}?([A-Za-z0-9\\-/]*\\d+[A-Za-z0-9\\-/]*)`, 'i'));
       if (numMatch) data.invoiceNumber = numMatch[1];
-      // 8-Digit Fallback
       if (!data.invoiceNumber || !/^\d{8}$/.test(data.invoiceNumber)) {
-        const eightDigitMatch = text.match(/\b(\d{8})\b/);
-        if (eightDigitMatch) data.invoiceNumber = eightDigitMatch[1];
+        const eightDigit = text.match(/\b(\d{8})\b/);
+        if (eightDigit) data.invoiceNumber = eightDigit[1];
       }
 
-      // AMOUNT
+      // AMOUNT & CONVERSION
       const amountKey = matchedRule.keywords.amount;
-      const amountRegex = new RegExp(`${amountKey}.{0,60}?([\\d.,]+)\\s*[€A-Z]*`, 'i');
+      const amountRegex = new RegExp(`${amountKey}.{0,60}?([\\d.,]+)(?:\\s*[€A-ZKčzł]*)`, 'i');
       let amountMatch = singleLineText.match(amountRegex);
-      if (amountMatch && (amountMatch[1].includes('.') || amountMatch[1].includes(','))) {
-        data.amount = parseCurrency(amountMatch[1]);
-      } else {
+      
+      // Fallback Line search
+      if (!amountMatch) {
         for (const line of lines) {
            if (new RegExp(amountKey, 'i').test(line)) {
-             const priceMatch = line.match(/([\d.,]+)\s*[€A-Z]*/);
+             const priceMatch = line.match(/([\d.,]+)/);
              if (priceMatch && (priceMatch[1].includes('.') || priceMatch[1].includes(','))) {
-                data.amount = parseCurrency(priceMatch[1]);
+                amountMatch = priceMatch;
                 break;
              }
            }
         }
       }
 
-      if (user) {
-        await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'invoices'), data);
+      if (amountMatch) {
+        const val = parseCurrency(amountMatch[1]);
+        data.originalAmount = val;
+        
+        if (matchedRule.currency === 'CZK') {
+          data.amount = val / rates.CZK;
+        } else if (matchedRule.currency === 'PLN') {
+          data.amount = val / rates.PLN;
+        } else {
+          data.amount = val;
+        }
       }
-    } catch (err) {
-      console.error(`Error processing ${file.name}:`, err);
-      setError(`Fehler bei Datei ${file.name}: ${err.message}`);
-    }
+
+      if (user) await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'invoices'), data);
+    } catch (err) { setError(`Fehler bei ${file.name}: ${err.message}`); }
   };
 
   const handleFileUpload = async (e) => {
     const files = Array.from(e.target.files);
-    if (files.length === 0 || !pdfLib) return;
-    setProcessing(true);
-    setError(null);
-    setLastProcessedText("");
-    try {
-      await Promise.all(files.map(file => processInvoice(file)));
-    } catch (err) {
-      console.error("Batch error:", err);
-      setError("Ein Fehler ist aufgetreten.");
-    } finally {
-      setProcessing(false);
-      e.target.value = null; 
-    }
+    if (files.length === 0) return;
+    setProcessing(true); setError(null); setLastProcessedText("");
+    try { await Promise.all(files.map(processInvoice)); } 
+    catch (err) { console.error(err); setError("Batch Fehler."); } 
+    finally { setProcessing(false); e.target.value = null; }
   };
 
   const downloadCSV = () => {
     if (invoices.length === 0) return;
-    const headers = ['Land', 'Belegdatum', 'Belegnummer', 'Buchungstext', 'Buchungsbetrag', 'Sollkonto', 'Habenkonto', 'Steuerschluessel', 'EU Land', 'EU %'];
+    const headers = ['Land', 'Belegdatum', 'Belegnummer', 'Buchungstext', 'Buchungsbetrag (EUR)', 'Original', 'Währ.', 'Soll', 'Haben', 'Steuer', 'EU Land', 'EU %'];
     const rows = invoices.map(inv => [
-      inv.countryId, inv.date, inv.invoiceNumber, inv.bookingText, inv.amount.toFixed(2).replace('.', ','), inv.sollkonto, inv.habenkonto, inv.taxKey || '', inv.euLand, inv.euRate
+      inv.countryId, inv.date, inv.invoiceNumber, inv.bookingText, 
+      inv.amount.toFixed(2).replace('.', ','), 
+      inv.originalAmount ? inv.originalAmount.toFixed(2).replace('.', ',') : '',
+      inv.currency || 'EUR',
+      inv.sollkonto, inv.habenkonto, inv.taxKey || '', inv.euLand, inv.euRate
     ]);
     const csvContent = "data:text/csv;charset=utf-8," + [headers.join(';'), ...rows.map(e => e.join(';'))].join('\n');
-    const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
+    link.setAttribute("href", encodeURI(csvContent));
     link.setAttribute("download", "buchungsliste_export.csv");
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    document.body.appendChild(link); link.click(); document.body.removeChild(link);
   };
 
-  if (loading) return <div className="flex h-screen items-center justify-center bg-gray-50"><Loader2 className="h-8 w-8 animate-spin text-blue-600" /></div>;
+  if (loading) return <div className="flex h-screen items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-blue-600" /></div>;
   if (!user) return <div className="flex h-screen items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-blue-600" /></div>;
 
   return (
     <div className="min-h-screen bg-gray-50 font-sans text-gray-900">
-      <header className="bg-white shadow-sm">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4 sm:px-6 lg:px-8">
+      
+      {/* SETTINGS MODAL */}
+      {showSettings && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-xl bg-white p-6 shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold">Währungskurse (EUR Basis)</h3>
+              <button onClick={() => setShowSettings(false)} className="text-gray-400 hover:text-gray-600"><X className="h-5 w-5"/></button>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">CZK Kurs (1 EUR = ? CZK)</label>
+                <input 
+                  type="number" 
+                  step="0.000001" 
+                  value={rates.CZK} 
+                  onChange={(e) => setRates({...rates, CZK: parseFloat(e.target.value)})}
+                  className="w-full rounded-md border-gray-300 shadow-sm p-2 border"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">PLN Kurs (1 EUR = ? PLN)</label>
+                <input 
+                  type="number" 
+                  step="0.000001" 
+                  value={rates.PLN} 
+                  onChange={(e) => setRates({...rates, PLN: parseFloat(e.target.value)})}
+                  className="w-full rounded-md border-gray-300 shadow-sm p-2 border"
+                />
+              </div>
+              <button onClick={() => setShowSettings(false)} className="w-full mt-4 flex items-center justify-center gap-2 bg-blue-600 text-white rounded-lg py-2 hover:bg-blue-700">
+                <Save className="h-4 w-4" /> Speichern & Schließen
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <header className="bg-white shadow-sm sticky top-0 z-10">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4">
           <div className="flex items-center gap-2">
             <FileText className="h-6 w-6 text-blue-600" />
-            <h1 className="text-xl font-bold text-gray-900">InvoiceAuto SaaS</h1>
+            <h1 className="text-xl font-bold">InvoiceAuto SaaS <span className="text-xs bg-gray-100 px-2 py-1 rounded ml-2">MULTI-CURRENCY</span></h1>
           </div>
-          <div className="flex items-center gap-4">
-            <button onClick={() => setDebugMode(!debugMode)} className={`rounded-md p-2 hover:bg-gray-100 ${debugMode ? 'text-blue-600' : 'text-gray-400'}`}><Bug className="h-5 w-5" /></button>
-            <span className="hidden text-sm text-gray-500 sm:block">User: {user.uid.slice(0,6)}...</span>
-            <button onClick={() => signOut(auth)} className="rounded-md p-2 text-gray-400 hover:bg-gray-100"><LogOut className="h-5 w-5" /></button>
+          <div className="flex items-center gap-3">
+            <button onClick={() => setShowSettings(true)} className="flex items-center gap-2 rounded-md bg-gray-100 px-3 py-2 text-sm font-medium hover:bg-gray-200">
+              <Settings className="h-4 w-4" /> Kurse
+            </button>
+            <button onClick={() => setDebugMode(!debugMode)} className={`p-2 rounded-md ${debugMode ? 'bg-blue-50 text-blue-600' : 'text-gray-400 hover:bg-gray-100'}`}><Bug className="h-5 w-5"/></button>
+            <button onClick={() => signOut(auth)} className="p-2 text-gray-400 hover:bg-gray-100 rounded-md"><LogOut className="h-5 w-5"/></button>
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+
+      <main className="mx-auto max-w-7xl px-4 py-8">
         {debugMode && (
-          <div className="mb-8 rounded-xl bg-gray-900 p-4 text-gray-100 shadow-lg">
-            <div className="mb-2 flex items-center justify-between border-b border-gray-700 pb-2"><h3 className="font-mono text-sm font-bold text-green-400">DEBUG</h3><button onClick={() => setDebugMode(false)}><X className="h-4 w-4" /></button></div>
-            <pre className="max-h-60 overflow-y-auto whitespace-pre-wrap font-mono text-xs text-gray-300">{lastProcessedText}</pre>
+          <div className="mb-8 rounded-xl bg-gray-900 p-4 text-gray-100 shadow-lg overflow-hidden">
+            <div className="flex justify-between border-b border-gray-700 pb-2 mb-2"><span className="text-green-400 font-mono text-sm">DEBUG LOG</span><X className="h-4 w-4 cursor-pointer" onClick={()=>setDebugMode(false)}/></div>
+            <pre className="max-h-40 overflow-y-auto font-mono text-xs text-gray-400">{lastProcessedText}</pre>
           </div>
         )}
-        <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <div className="rounded-xl bg-white p-6 shadow-sm border border-gray-100"><div className="flex justify-between"><div><p className="text-sm font-medium text-gray-500">Rechnungen</p><p className="mt-1 text-3xl font-bold">{invoices.length}</p></div><CheckCircle className="h-6 w-6 text-green-600" /></div></div>
-          <div className="rounded-xl bg-white p-6 shadow-sm border border-gray-100"><div className="flex justify-between"><div><p className="text-sm font-medium text-gray-500">Volumen</p><p className="mt-1 text-3xl font-bold">{invoices.reduce((acc, curr) => acc + (curr.amount || 0), 0).toFixed(2)} €</p></div><Activity className="h-6 w-6 text-blue-600" /></div></div>
-          <div className="rounded-xl bg-indigo-600 p-6 shadow-sm text-white flex flex-col gap-4">
-            <div>
-              <p className="text-sm font-medium text-indigo-100">Daten</p>
-              <h3 className="mt-1 text-xl font-bold">Verwaltung</h3>
-            </div>
-            <div className="flex gap-2">
-              <button onClick={downloadCSV} disabled={invoices.length===0} className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-white/20 py-2 text-sm font-semibold transition hover:bg-white/30 disabled:opacity-50">
-                <Download className="h-4 w-4" /> CSV
-              </button>
-              <button onClick={handleDeleteAll} disabled={invoices.length===0 || processing} className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-red-500/80 py-2 text-sm font-semibold transition hover:bg-red-500 disabled:opacity-50">
-                <Trash2 className="h-4 w-4" /> Alle
-              </button>
-            </div>
+
+        <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-4">
+          <div className="rounded-xl bg-white p-5 shadow-sm border border-gray-100">
+            <p className="text-sm text-gray-500">Gesamt Volumen (EUR)</p>
+            <p className="text-2xl font-bold mt-1">{invoices.reduce((acc, curr) => acc + (curr.amount || 0), 0).toFixed(2)} €</p>
+          </div>
+          <div className="rounded-xl bg-white p-5 shadow-sm border border-gray-100">
+            <p className="text-sm text-gray-500">Aktueller Kurs CZK</p>
+            <p className="text-2xl font-bold mt-1 text-indigo-600">{rates.CZK.toFixed(4)}</p>
+          </div>
+          <div className="rounded-xl bg-white p-5 shadow-sm border border-gray-100">
+            <p className="text-sm text-gray-500">Aktueller Kurs PLN</p>
+            <p className="text-2xl font-bold mt-1 text-indigo-600">{rates.PLN.toFixed(4)}</p>
+          </div>
+          <div className="rounded-xl bg-indigo-600 p-5 shadow-sm text-white flex flex-col justify-center gap-2">
+            <button onClick={downloadCSV} disabled={invoices.length===0} className="w-full flex justify-center items-center gap-2 bg-white/20 hover:bg-white/30 py-2 rounded-lg text-sm font-semibold disabled:opacity-50"><Download className="h-4 w-4"/> CSV Export</button>
+            <button onClick={handleDeleteAll} disabled={invoices.length===0} className="w-full flex justify-center items-center gap-2 bg-red-500/80 hover:bg-red-500 py-2 rounded-lg text-sm font-semibold disabled:opacity-50"><Trash2 className="h-4 w-4"/> Alle Löschen</button>
           </div>
         </div>
-        <div className="mb-8 rounded-xl border-2 border-dashed border-gray-300 bg-white p-8 text-center">
-          <div className="flex flex-col items-center">
-            <div className="mb-4 rounded-full bg-blue-50 p-4"><Upload className="h-8 w-8 text-blue-600" /></div>
-            <h3 className="mb-2 text-lg font-medium">PDF Upload</h3>
-            <input type="file" accept="application/pdf" multiple onChange={handleFileUpload} className="hidden" id="file-upload" disabled={processing} />
-            <label htmlFor="file-upload" className={`cursor-pointer rounded-lg bg-blue-600 px-6 py-2.5 font-semibold text-white shadow-sm transition hover:bg-blue-700 ${processing ? 'opacity-50' : ''}`}>{processing ? 'Verarbeite...' : 'Dateien wählen'}</label>
-            {error && <div className="mt-4 flex items-center gap-2 text-sm text-red-600"><AlertCircle className="h-4 w-4" />{error}</div>}
-          </div>
+
+        <div className="mb-8 p-8 border-2 border-dashed border-gray-300 rounded-xl bg-white text-center hover:border-blue-400 transition">
+          <Upload className="h-10 w-10 text-blue-500 mx-auto mb-4"/>
+          <h3 className="text-lg font-medium text-gray-900">Rechnungen hier ablegen</h3>
+          <p className="text-sm text-gray-500 mb-6">PDF (DE, AT, IT, FR, CZ, PL)</p>
+          <input type="file" multiple accept="application/pdf" onChange={handleFileUpload} className="hidden" id="upload" disabled={processing}/>
+          <label htmlFor="upload" className="cursor-pointer bg-blue-600 text-white px-6 py-2.5 rounded-lg font-semibold hover:bg-blue-700 shadow-sm disabled:opacity-50">
+            {processing ? 'Verarbeite...' : 'Dateien auswählen'}
+          </label>
+          {error && <div className="mt-4 text-sm text-red-600 flex items-center justify-center gap-2"><AlertCircle className="h-4 w-4"/>{error}</div>}
         </div>
-        <div className="overflow-hidden rounded-xl bg-white shadow-sm border border-gray-200">
+
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50"><tr>{['Land', 'Datum', 'Beleg Nr.', 'Betrag', 'Soll / Haben', 'Steuer', 'EU Info', ''].map(h => (<th key={h} className="px-6 py-3 text-left text-xs font-medium uppercase text-gray-500">{h}</th>))}</tr></thead>
-              <tbody className="divide-y divide-gray-200 bg-white">
-                {invoices.length === 0 ? <tr><td colSpan="8" className="px-6 py-12 text-center text-gray-500">Keine Daten.</td></tr> : invoices.map(inv => (
+              <thead className="bg-gray-50">
+                <tr>
+                  {['Land', 'Datum', 'Beleg Nr.', 'Betrag (EUR)', 'Original', 'Soll / Haben', 'EU Info', ''].map(h => <th key={h} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>)}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {invoices.length === 0 ? <tr><td colSpan="8" className="px-6 py-12 text-center text-gray-500">Keine Daten vorhanden.</td></tr> : invoices.map(inv => (
                   <tr key={inv.id} className="hover:bg-gray-50">
-                    <td className="whitespace-nowrap px-6 py-4 text-sm font-bold">{inv.countryId}</td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm">{inv.date}</td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-500">{inv.invoiceNumber}</td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm font-medium">{inv.amount.toFixed(2)} €</td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-500">{inv.sollkonto} / {inv.habenkonto}</td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-500">{inv.taxKey || '-'}</td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-500">{inv.euLand} ({inv.euRate})</td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm text-right"><button onClick={() => handleDelete(inv.id)} className="text-red-500 hover:text-red-700 p-1"><Trash2 className="h-5 w-5" /></button></td>
+                    <td className="px-6 py-4 text-sm font-bold text-gray-700">{inv.countryId}</td>
+                    <td className="px-6 py-4 text-sm">{inv.date}</td>
+                    <td className="px-6 py-4 text-sm text-gray-500">{inv.invoiceNumber}</td>
+                    <td className="px-6 py-4 text-sm font-bold text-gray-900">{inv.amount.toFixed(2)} €</td>
+                    <td className="px-6 py-4 text-sm text-gray-400">
+                      {inv.originalAmount ? `${inv.originalAmount.toFixed(2)} ${inv.currency}` : '-'}
+                    </td>
+                    <td className="px-6 py-4 text-sm text-gray-500">{inv.sollkonto} / {inv.habenkonto}</td>
+                    <td className="px-6 py-4 text-sm text-gray-500">{inv.euLand} ({inv.euRate})</td>
+                    <td className="px-6 py-4 text-right">
+                      <button onClick={() => handleDelete(inv.id)} className="text-red-400 hover:text-red-600"><Trash2 className="h-4 w-4"/></button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
